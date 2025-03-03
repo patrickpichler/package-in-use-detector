@@ -17,6 +17,15 @@ type tracerConfig struct {
 	MaxReached   uint64
 }
 
+type tracerFileAccessKey struct {
+	MntNs            uint32
+	Pid              int32
+	ProcessStartTime uint64
+	Path             struct{ Parts [16]uint32 }
+}
+
+type tracerFileAccessValue struct{ Counter uint8 }
+
 type tracerStringKey struct{ Str [255]int8 }
 
 type tracerStringValue struct{ Id uint32 }
@@ -70,8 +79,11 @@ type tracerProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tracerMapSpecs struct {
-	ConfigMap *ebpf.MapSpec `ebpf:"config_map"`
-	Strings   *ebpf.MapSpec `ebpf:"strings"`
+	ConfigMap        *ebpf.MapSpec `ebpf:"config_map"`
+	FileAccess       *ebpf.MapSpec `ebpf:"file_access"`
+	FilePathScratch  *ebpf.MapSpec `ebpf:"file_path_scratch"`
+	StringKeyScratch *ebpf.MapSpec `ebpf:"string_key_scratch"`
+	Strings          *ebpf.MapSpec `ebpf:"strings"`
 }
 
 // tracerVariableSpecs contains global variables before they are loaded into the kernel.
@@ -100,13 +112,19 @@ func (o *tracerObjects) Close() error {
 //
 // It can be passed to loadTracerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tracerMaps struct {
-	ConfigMap *ebpf.Map `ebpf:"config_map"`
-	Strings   *ebpf.Map `ebpf:"strings"`
+	ConfigMap        *ebpf.Map `ebpf:"config_map"`
+	FileAccess       *ebpf.Map `ebpf:"file_access"`
+	FilePathScratch  *ebpf.Map `ebpf:"file_path_scratch"`
+	StringKeyScratch *ebpf.Map `ebpf:"string_key_scratch"`
+	Strings          *ebpf.Map `ebpf:"strings"`
 }
 
 func (m *tracerMaps) Close() error {
 	return _TracerClose(
 		m.ConfigMap,
+		m.FileAccess,
+		m.FilePathScratch,
+		m.StringKeyScratch,
 		m.Strings,
 	)
 }

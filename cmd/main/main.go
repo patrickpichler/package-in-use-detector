@@ -30,9 +30,11 @@ func run(log *slog.Logger, ctx context.Context) error {
 		return fmt.Errorf("error while loading tracer: %w", err)
 	}
 
+	fmt.Println("init...")
 	if err := tracer.Init(); err != nil {
 		return fmt.Errorf("error while initializing tracer: %w", err)
 	}
+	fmt.Println("init done...")
 
 	select {
 	case <-ctx.Done():
