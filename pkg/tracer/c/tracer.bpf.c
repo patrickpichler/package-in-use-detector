@@ -18,8 +18,11 @@
 #define BUF_SIZE 1024
 
 struct config {
-  u64 next_string_id;
-  u64 max_reached;
+  u64 current_string_id;
+  u64 max_string_reached;
+
+  u64 current_file_id;
+  u64 max_file_reached;
 };
 
 struct {
@@ -50,17 +53,35 @@ struct file_path {
   u32 parts[MAX_PATH_COMPONENTS];
 };
 
+struct file_key {
+  struct file_path path;
+};
+
+struct file_value {
+  u32 id;
+};
+
+#define MAX_FILES 65535
+
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, MAX_FILES);
+  __type(key, struct file_key);
+  __type(value, struct file_value);
+} files SEC(".maps");
+
+#define MAX_FILE_ACCESS 65535
+
 struct file_access_key {
   u32 mnt_ns;
   pid_t pid;
   u64 process_start_time;
-  struct file_path path;
+  u32 file_id;
 };
+
 struct file_access_value {
   u8 counter;
 };
-
-#define MAX_FILE_ACCESS 65535
 
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
@@ -85,24 +106,83 @@ struct {
 
 static __always_inline u32 can_inline(struct string_key *key)
 {
+  bool less_than_four_chars = false;
+
 #pragma unroll
   for (int i = 0; i < 5; i++) {
     if (key->str[i] == '\0') {
-      return 1;
+      less_than_four_chars = true;
+      break;
     }
+  }
 
-    // We cannot inline values with the MSB in the fourth char set, as this bit
-    // is used to mark if the id is inlined or not.
-    if (i == 4 && key->str[0] & 0x100) {
-      bpf_printk("cannot inline since first str is %d", key->str[0]);
+  // We cannot inline values with the MSB in the fourth char set, as this bit
+  // is used to mark if the id is inlined or not.
+  if (less_than_four_chars && key->str[3] & 1 << 7) {
+    bpf_printk("cannot inline since forth str is %d", key->str[3]);
+    return 0;
+  }
+
+  return less_than_four_chars;
+}
+
+static __always_inline u32 find_file_id(struct file_key *key)
+{
+  struct file_value *val;
+
+  val = bpf_map_lookup_elem(&files, key);
+
+  if (!val) {
+    u64 id;
+    u32 zero = 0;
+    struct config *c = bpf_map_lookup_elem(&config_map, &zero);
+    if (!c) {
+      bpf_printk("no config");
       return 0;
     }
+    if (c->max_file_reached) {
+      bpf_printk("max file reached");
+      return 0;
+    }
+
+    barrier();
+    __sync_fetch_and_add(&c->current_file_id, 1);
+    id = c->current_file_id;
+    // TODO(patrick.pichler): figure out why atomic operations do not work.
+    // Return value cannot be assigned and is causing this error
+    //  > BPF_STX uses reserved fields
+    // id = __sync_fetch_and_add(&c->next_string_id, 1);
+    barrier();
+
+    // If we ever reach a value that can no longer expressed via u32, the IDs are full and we
+    // can only abort.
+    if (id & 0x200000000) {
+      __sync_fetch_and_add(&c->max_file_reached, 1);
+      bpf_printk("max file id reached");
+      return 0;
+    }
+
+    if (bpf_map_update_elem(&files, key, &id, BPF_NOEXIST)) {
+      // Most like due to race condition
+      val = bpf_map_lookup_elem(&files, key);
+      if (val) {
+        return val->id;
+      } else {
+        bpf_printk("no file val");
+        // Some error we cannot recover from;
+        return 0;
+      }
+    } else {
+      return id;
+    }
+  } else {
+    return val->id;
   }
 
   return 0;
 }
 
-static __always_inline u32 find_id(struct string_key *key)
+static __always_inline u32 find_string_id(struct string_key *key)
 {
   if (can_inline(key)) {
     u32 id = 0;
@@ -122,21 +202,23 @@ static __always_inline u32 find_id(struct string_key *key)
       bpf_printk("no config");
       return 0;
     }
-    if (c->max_reached) {
+
+    if (c->max_string_reached) {
       bpf_printk("max reached");
       return 0;
     }
 
     barrier();
-    __sync_fetch_and_add(&c->next_string_id, 1);
-    id = c->next_string_id;
+    __sync_fetch_and_add(&c->current_string_id, 1);
+    id = c->current_string_id;
     // TODO(patrick.pichler): figure out why atomic operations do not work.
     // Return value cannot be assigned and is causing this error
     //  > BPF_STX uses reserved fields
     // id = __sync_fetch_and_add(&c->next_string_id, 1);
     barrier();
+
     if (id & 0x100000000) {
-      __sync_fetch_and_add(&c->max_reached, 1);
+      __sync_fetch_and_add(&c->max_string_reached, 1);
       bpf_printk("max id reached");
       return 0;
     }
@@ -185,7 +267,7 @@ static __always_inline u32 get_string_id(struct qstr str)
     return 0;
   }
 
-  return find_id(key);
+  return find_string_id(key);
 }
 
 static __always_inline int get_path(struct path *path, struct file_path *out)
@@ -204,6 +286,7 @@ static __always_inline int get_path(struct path *path, struct file_path *out)
   int current = 0;
   u32 zero = 0;
   u32 *parts;
+  char name[255];
 
   parts = bpf_map_lookup_elem(&file_path_scratch, &zero);
   if (!parts) {
@@ -225,6 +308,8 @@ static __always_inline int get_path(struct path *path, struct file_path *out)
         break;
       }
       if (mnt_p != mnt_parent_p) {
+        BPF_CORE_READ_INTO(&dentry, // NOLINT(bugprone-sizeof-expression)
+                           mnt_p, mnt_mountpoint);
         BPF_CORE_READ_INTO(&mnt_p, // NOLINT(bugprone-sizeof-expression)
                            mnt_p, mnt_parent);
         BPF_CORE_READ_INTO(&mnt_parent_p, // NOLINT(bugprone-sizeof-expression)
@@ -232,6 +317,7 @@ static __always_inline int get_path(struct path *path, struct file_path *out)
         vfsmnt = &mnt_p->mnt;
         continue;
       }
+
       // Global root - path fully parsed
       break;
     }
@@ -240,7 +326,7 @@ static __always_inline int get_path(struct path *path, struct file_path *out)
     BPF_CORE_READ_INTO(&d_name, dentry, d_name);
 
     u32 id = get_string_id(d_name);
-    bpf_printk("got id %d", id);
+
     if (!id) {
       bpf_printk("no id");
       // Something is broken and we cannot get the ID
@@ -252,9 +338,7 @@ static __always_inline int get_path(struct path *path, struct file_path *out)
     }
 
     parts[current] = id;
-
     dentry = d_parent;
-
     current++;
   }
 
@@ -271,7 +355,6 @@ static __always_inline int get_path(struct path *path, struct file_path *out)
   // TODO(patrick.pichler): implement
   // }
 
-  bpf_printk("wat %d", current);
   return 1;
 }
 
@@ -280,13 +363,22 @@ int BPF_KPROBE(security_file_open, struct file *file)
 {
   struct path path;
   struct file_access_key key = {0};
+  struct file_key f_key = {};
 
   BPF_CORE_READ_INTO(&path, file, f_path);
 
-  if (!get_path(&path, &key.path)) {
+  if (!get_path(&path, &f_key.path)) {
     bpf_printk("cannot get filepath");
     return 0;
   }
+
+  u32 f_id = find_file_id(&f_key);
+  if (!f_id) {
+    bpf_printk("cannot get file id");
+    return 0;
+  }
+
+  key.file_id = f_id;
 
   struct task_struct *t = (void *) bpf_get_current_task();
 

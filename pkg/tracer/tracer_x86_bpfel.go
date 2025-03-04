@@ -13,18 +13,25 @@ import (
 )
 
 type tracerConfig struct {
-	NextStringId uint64
-	MaxReached   uint64
+	CurrentStringId  uint64
+	MaxStringReached uint64
+	CurrentFileId    uint64
+	MaxFileReached   uint64
 }
 
 type tracerFileAccessKey struct {
 	MntNs            uint32
 	Pid              int32
 	ProcessStartTime uint64
-	Path             struct{ Parts [16]uint32 }
+	FileId           uint32
+	_                [4]byte
 }
 
 type tracerFileAccessValue struct{ Counter uint8 }
+
+type tracerFileKey struct{ Path struct{ Parts [16]uint32 } }
+
+type tracerFileValue struct{ Id uint32 }
 
 type tracerStringKey struct{ Str [255]int8 }
 
@@ -82,6 +89,7 @@ type tracerMapSpecs struct {
 	ConfigMap        *ebpf.MapSpec `ebpf:"config_map"`
 	FileAccess       *ebpf.MapSpec `ebpf:"file_access"`
 	FilePathScratch  *ebpf.MapSpec `ebpf:"file_path_scratch"`
+	Files            *ebpf.MapSpec `ebpf:"files"`
 	StringKeyScratch *ebpf.MapSpec `ebpf:"string_key_scratch"`
 	Strings          *ebpf.MapSpec `ebpf:"strings"`
 }
@@ -115,6 +123,7 @@ type tracerMaps struct {
 	ConfigMap        *ebpf.Map `ebpf:"config_map"`
 	FileAccess       *ebpf.Map `ebpf:"file_access"`
 	FilePathScratch  *ebpf.Map `ebpf:"file_path_scratch"`
+	Files            *ebpf.Map `ebpf:"files"`
 	StringKeyScratch *ebpf.Map `ebpf:"string_key_scratch"`
 	Strings          *ebpf.Map `ebpf:"strings"`
 }
@@ -124,6 +133,7 @@ func (m *tracerMaps) Close() error {
 		m.ConfigMap,
 		m.FileAccess,
 		m.FilePathScratch,
+		m.Files,
 		m.StringKeyScratch,
 		m.Strings,
 	)
