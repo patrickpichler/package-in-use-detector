@@ -29,6 +29,7 @@ func runTracer(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("error while loading tracer: %w", err)
 	}
+	defer tracer.Close()
 
 	fmt.Println("init...")
 	if err := tracer.Init(); err != nil {
