@@ -33,9 +33,13 @@ type tracerFileKey struct{ Path struct{ Parts [16]uint32 } }
 
 type tracerFileValue struct{ Id uint32 }
 
-type tracerStringKey struct{ Str [255]int8 }
+type tracerStringKey struct{ Hash uint32 }
 
-type tracerStringValue struct{ Id uint32 }
+type tracerStringValue struct {
+	Str              [255]int8
+	_                [1]byte
+	CollisionCounter uint32
+}
 
 // loadTracer returns the embedded CollectionSpec for tracer.
 func loadTracer() (*ebpf.CollectionSpec, error) {
@@ -86,12 +90,12 @@ type tracerProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tracerMapSpecs struct {
-	ConfigMap        *ebpf.MapSpec `ebpf:"config_map"`
-	FileAccess       *ebpf.MapSpec `ebpf:"file_access"`
-	FilePathScratch  *ebpf.MapSpec `ebpf:"file_path_scratch"`
-	Files            *ebpf.MapSpec `ebpf:"files"`
-	StringKeyScratch *ebpf.MapSpec `ebpf:"string_key_scratch"`
-	Strings          *ebpf.MapSpec `ebpf:"strings"`
+	ConfigMap          *ebpf.MapSpec `ebpf:"config_map"`
+	FileAccess         *ebpf.MapSpec `ebpf:"file_access"`
+	FilePathScratch    *ebpf.MapSpec `ebpf:"file_path_scratch"`
+	Files              *ebpf.MapSpec `ebpf:"files"`
+	StringValueScratch *ebpf.MapSpec `ebpf:"string_value_scratch"`
+	Strings            *ebpf.MapSpec `ebpf:"strings"`
 }
 
 // tracerVariableSpecs contains global variables before they are loaded into the kernel.
@@ -120,12 +124,12 @@ func (o *tracerObjects) Close() error {
 //
 // It can be passed to loadTracerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tracerMaps struct {
-	ConfigMap        *ebpf.Map `ebpf:"config_map"`
-	FileAccess       *ebpf.Map `ebpf:"file_access"`
-	FilePathScratch  *ebpf.Map `ebpf:"file_path_scratch"`
-	Files            *ebpf.Map `ebpf:"files"`
-	StringKeyScratch *ebpf.Map `ebpf:"string_key_scratch"`
-	Strings          *ebpf.Map `ebpf:"strings"`
+	ConfigMap          *ebpf.Map `ebpf:"config_map"`
+	FileAccess         *ebpf.Map `ebpf:"file_access"`
+	FilePathScratch    *ebpf.Map `ebpf:"file_path_scratch"`
+	Files              *ebpf.Map `ebpf:"files"`
+	StringValueScratch *ebpf.Map `ebpf:"string_value_scratch"`
+	Strings            *ebpf.Map `ebpf:"strings"`
 }
 
 func (m *tracerMaps) Close() error {
@@ -134,7 +138,7 @@ func (m *tracerMaps) Close() error {
 		m.FileAccess,
 		m.FilePathScratch,
 		m.Files,
-		m.StringKeyScratch,
+		m.StringValueScratch,
 		m.Strings,
 	)
 }

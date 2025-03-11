@@ -94,5 +94,7 @@ func (t *Tracer) Init() error {
 }
 
 func (t *Tracer) Close() {
-	t.programLinks.securityFileOpenLink.Close()
+	if t.programLinks != nil {
+		t.programLinks.securityFileOpenLink.Close()
+	}
 }

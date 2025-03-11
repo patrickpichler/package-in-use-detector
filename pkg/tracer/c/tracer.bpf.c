@@ -8,6 +8,8 @@
 
 #include "bpf_kfuncs.h"
 #include "types.h"
+#include "xxhash.h"
+#include "fasthash.h"
 
 #define MAX_NUM_MOUNT_NS  1024
 #define MAX_FILES_TRACKED 8192
@@ -33,11 +35,12 @@ struct {
 } config_map SEC(".maps");
 
 struct string_key {
-  char str[MAX_STRING_LEN];
+  u32 hash;
 };
 
 struct string_value {
-  u32 id;
+  char str[MAX_STRING_LEN];
+  u32 collision_counter;
 };
 
 struct {
@@ -94,8 +97,8 @@ struct {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
   __uint(max_entries, 1);
   __type(key, u32);
-  __type(value, struct string_key);
-} string_key_scratch SEC(".maps");
+  __type(value, struct string_value);
+} string_value_scratch SEC(".maps");
 
 struct {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -104,13 +107,13 @@ struct {
   __type(value, u32[MAX_PATH_COMPONENTS]);
 } file_path_scratch SEC(".maps");
 
-static __always_inline u32 can_inline(struct string_key *key)
+static __always_inline u32 can_inline(struct string_value *str)
 {
   bool less_than_four_chars = false;
 
 #pragma unroll
   for (int i = 0; i < 5; i++) {
-    if (key->str[i] == '\0') {
+    if (str->str[i] == '\0') {
       less_than_four_chars = true;
       break;
     }
@@ -118,8 +121,8 @@ static __always_inline u32 can_inline(struct string_key *key)
 
   // We cannot inline values with the MSB in the fourth char set, as this bit
   // is used to mark if the id is inlined or not.
-  if (less_than_four_chars && key->str[3] & 1 << 7) {
-    bpf_printk("cannot inline since forth str is %d", key->str[3]);
+  if (less_than_four_chars && str->str[3] & 1 << 7) {
+    bpf_printk("cannot inline since forth str is %d", str->str[3]);
     return 0;
   }
 
@@ -182,79 +185,17 @@ static __always_inline u32 find_file_id(struct file_key *key)
   return 0;
 }
 
-static __always_inline u32 find_string_id(struct string_key *key)
-{
-  if (can_inline(key)) {
-    u32 id = 0;
-    __builtin_memcpy(&id, &key->str, 4);
-    return id;
-  }
-
-  struct string_value *val;
-
-  val = bpf_map_lookup_elem(&strings, key);
-
-  if (!val) {
-    u64 id;
-    u32 zero = 0;
-    struct config *c = bpf_map_lookup_elem(&config_map, &zero);
-    if (!c) {
-      bpf_printk("no config");
-      return 0;
-    }
-
-    if (c->max_string_reached) {
-      bpf_printk("max reached");
-      return 0;
-    }
-
-    barrier();
-    __sync_fetch_and_add(&c->current_string_id, 1);
-    id = c->current_string_id;
-    // TODO(patrick.pichler): figure out why atomic operations do not work.
-    // Return value cannot be assigned and is causing this error
-    //  > BPF_STX uses reserved fields
-    // id = __sync_fetch_and_add(&c->next_string_id, 1);
-    barrier();
-
-    if (id & 0x100000000) {
-      __sync_fetch_and_add(&c->max_string_reached, 1);
-      bpf_printk("max id reached");
-      return 0;
-    }
-
-    if (bpf_map_update_elem(&strings, key, &id, BPF_NOEXIST)) {
-      // Most like due to race condition
-      val = bpf_map_lookup_elem(&strings, key);
-      if (val) {
-        return val->id;
-      } else {
-        bpf_printk("no val");
-        // Some error we cannot recover from;
-        return 0;
-      }
-    } else {
-      return id;
-    }
-  } else {
-    return val->id;
-  }
-
-  bpf_printk("wat the fuck %s", key->str);
-  return 0;
-}
-
 static __always_inline u32 get_string_id(struct qstr str)
 {
   // TODO(patrick.pichler): key should probably be passed in as argument to be
   // reused.
   u32 zero = 0;
-  struct string_key *key = bpf_map_lookup_elem(&string_key_scratch, &zero);
-  if (!key) {
+  struct string_value *val = bpf_map_lookup_elem(&string_value_scratch, &zero);
+  if (!val) {
     return 0;
   }
 
-  __builtin_memset(key->str, 0, 255);
+  __builtin_memset(val->str, 0, 255);
 
   u32 str_len = str.len;
 
@@ -262,12 +203,56 @@ static __always_inline u32 get_string_id(struct qstr str)
     str_len = MAX_STRING_LEN;
   }
 
-  if (bpf_core_read(&key->str, str_len, str.name)) {
+  if (bpf_core_read(&val->str, str_len, str.name)) {
     // There is nothing we can do on failure.
     return 0;
   }
 
-  return find_string_id(key);
+  if (can_inline(val)) {
+    u32 id = 0;
+    __builtin_memcpy(&id, &val->str, 4);
+    return id;
+  }
+
+  struct string_key key = {0};
+
+  // TODO(patrick.pichler): benchmark if this brings any performance boost over just
+  // just calculating the has over the full buffer.
+  switch (str_len) {
+    case 0 ... 32:
+      key.hash = fasthash32(val->str, 32, 0);
+      break;
+    case 33 ... 64:
+      key.hash = fasthash32(val->str, 64, 0);
+      break;
+    case 65 ... 128:
+      key.hash = fasthash32(val->str, 128, 0);
+      break;
+    default:
+      key.hash = fasthash32(val->str, sizeof(val->str), 0);
+      break;
+  }
+
+  if (bpf_map_update_elem(&strings, &key, val, BPF_NOEXIST)) {
+    struct string_value *existing = bpf_map_lookup_elem(&strings, &key);
+    if (existing) {
+#pragma unroll
+      for (int i = 0; i < sizeof(val->str); i++) {
+        // collision found
+        if (val->str[i] != existing->str[i]) {
+          barrier();
+          __sync_fetch_and_add(&existing->collision_counter, 1);
+          break;
+        }
+        // No need to compare anything after the null termination, as the string ended.
+        if (val->str[i] == '\0') {
+          break;
+        }
+      }
+    }
+  }
+
+  return key.hash;
 }
 
 static __always_inline int get_path(struct path *path, struct file_path *out)

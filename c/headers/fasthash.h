@@ -23,10 +23,10 @@
    SOFTWARE.
 */
 
-#pragma once
+#ifndef FASTHASH_BPF_H
+#define FASTHASH_BPF_H
 
-#include <linux/types.h>
-#include <stddef.h>
+#include "types.h"
 
 // Compression function for Merkle-Damgard construction.
 // This function is generated using the framework provided.
@@ -78,3 +78,5 @@ static __attribute__((always_inline)) inline __u32 fasthash32(const void *buf, _
     __u64 h = fasthash64(buf, len, seed);
 	return h - (h >> 32);
 }
+
+#endif
