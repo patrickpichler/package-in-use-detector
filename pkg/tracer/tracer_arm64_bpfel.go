@@ -29,9 +29,12 @@ type tracerFileAccessKey struct {
 
 type tracerFileAccessValue struct{ Counter uint8 }
 
-type tracerFileKey struct{ Path struct{ Parts [16]uint32 } }
+type tracerFileKey struct{ Hash uint32 }
 
-type tracerFileValue struct{ Id uint32 }
+type tracerFileValue struct {
+	Path             struct{ Parts [16]uint32 }
+	CollisionCounter uint32
+}
 
 type tracerStringKey struct{ Hash uint32 }
 
@@ -93,6 +96,7 @@ type tracerMapSpecs struct {
 	ConfigMap          *ebpf.MapSpec `ebpf:"config_map"`
 	FileAccess         *ebpf.MapSpec `ebpf:"file_access"`
 	FilePathScratch    *ebpf.MapSpec `ebpf:"file_path_scratch"`
+	FileValueScratch   *ebpf.MapSpec `ebpf:"file_value_scratch"`
 	Files              *ebpf.MapSpec `ebpf:"files"`
 	StringValueScratch *ebpf.MapSpec `ebpf:"string_value_scratch"`
 	Strings            *ebpf.MapSpec `ebpf:"strings"`
@@ -127,6 +131,7 @@ type tracerMaps struct {
 	ConfigMap          *ebpf.Map `ebpf:"config_map"`
 	FileAccess         *ebpf.Map `ebpf:"file_access"`
 	FilePathScratch    *ebpf.Map `ebpf:"file_path_scratch"`
+	FileValueScratch   *ebpf.Map `ebpf:"file_value_scratch"`
 	Files              *ebpf.Map `ebpf:"files"`
 	StringValueScratch *ebpf.Map `ebpf:"string_value_scratch"`
 	Strings            *ebpf.Map `ebpf:"strings"`
@@ -137,6 +142,7 @@ func (m *tracerMaps) Close() error {
 		m.ConfigMap,
 		m.FileAccess,
 		m.FilePathScratch,
+		m.FileValueScratch,
 		m.Files,
 		m.StringValueScratch,
 		m.Strings,

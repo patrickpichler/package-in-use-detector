@@ -57,11 +57,12 @@ struct file_path {
 };
 
 struct file_key {
-  struct file_path path;
+  u32 hash;
 };
 
 struct file_value {
-  u32 id;
+  struct file_path path;
+  u32 collision_counter;
 };
 
 #define MAX_FILES 65535
@@ -107,6 +108,13 @@ struct {
   __type(value, u32[MAX_PATH_COMPONENTS]);
 } file_path_scratch SEC(".maps");
 
+struct {
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, u32);
+  __type(value, struct file_value);
+} file_value_scratch SEC(".maps");
+
 static __always_inline u32 can_inline(struct string_value *str)
 {
   bool less_than_four_chars = false;
@@ -129,60 +137,32 @@ static __always_inline u32 can_inline(struct string_value *str)
   return less_than_four_chars;
 }
 
-static __always_inline u32 find_file_id(struct file_key *key)
+static __always_inline u32 get_file_id(struct file_value *val)
 {
-  struct file_value *val;
+  struct file_key key = {0};
 
-  val = bpf_map_lookup_elem(&files, key);
+  key.hash = fasthash32(val->path.parts, sizeof(val->path.parts), 0);
 
-  if (!val) {
-    u64 id;
-    u32 zero = 0;
-    struct config *c = bpf_map_lookup_elem(&config_map, &zero);
-    if (!c) {
-      bpf_printk("no config");
-      return 0;
-    }
-    if (c->max_file_reached) {
-      bpf_printk("max file reached");
-      return 0;
-    }
-
-    barrier();
-    __sync_fetch_and_add(&c->current_file_id, 1);
-    id = c->current_file_id;
-    // TODO(patrick.pichler): figure out why atomic operations do not work.
-    // Return value cannot be assigned and is causing this error
-    //  > BPF_STX uses reserved fields
-    // id = __sync_fetch_and_add(&c->next_string_id, 1);
-    barrier();
-
-    // If we ever reach a value that can no longer expressed via u32, the IDs are full and we
-    // can only abort.
-    if (id & 0x200000000) {
-      __sync_fetch_and_add(&c->max_file_reached, 1);
-      bpf_printk("max file id reached");
-      return 0;
-    }
-
-    if (bpf_map_update_elem(&files, key, &id, BPF_NOEXIST)) {
-      // Most like due to race condition
-      val = bpf_map_lookup_elem(&files, key);
-      if (val) {
-        return val->id;
-      } else {
-        bpf_printk("no file val");
-        // Some error we cannot recover from;
-        return 0;
+  if (bpf_map_update_elem(&files, &key, val, BPF_NOEXIST)) {
+    struct file_value *existing = bpf_map_lookup_elem(&files, &key);
+    if (existing) {
+#pragma unroll
+      for (int i = 0; i < MAX_PATH_COMPONENTS; i++) {
+        // collision found
+        if (val->path.parts[i] != existing->path.parts[i]) {
+          barrier();
+          __sync_fetch_and_add(&existing->collision_counter, 1);
+          break;
+        }
+        // No need to compare anything after the null termination, as the string ended.
+        if (val->path.parts[i] == 0) {
+          break;
+        }
       }
-    } else {
-      return id;
     }
-  } else {
-    return val->id;
   }
 
-  return 0;
+  return key.hash;
 }
 
 static __always_inline u32 get_string_id(struct qstr str)
@@ -310,6 +290,8 @@ static __always_inline int get_path(struct path *path, struct file_path *out)
     // Add this dentry name to path
     BPF_CORE_READ_INTO(&d_name, dentry, d_name);
 
+    // TODO(patrick.pichler): split up getting id and interning string in order to allow for proper
+    // ignore of folders.
     u32 id = get_string_id(d_name);
 
     if (!id) {
@@ -348,16 +330,25 @@ int BPF_KPROBE(security_file_open, struct file *file)
 {
   struct path path;
   struct file_access_key key = {0};
-  struct file_key f_key = {};
+  struct file_value *f_val;
+  u32 zero = 0;
+
+  f_val = bpf_map_lookup_elem(&file_value_scratch, &zero);
+  if (!f_val) {
+    bpf_printk("cannot get file scratch");
+    return 0;
+  }
+
+  __builtin_memset(&f_val->path, 0, sizeof(f_val->path));
 
   BPF_CORE_READ_INTO(&path, file, f_path);
 
-  if (!get_path(&path, &f_key.path)) {
+  if (!get_path(&path, &f_val->path)) {
     bpf_printk("cannot get filepath");
     return 0;
   }
 
-  u32 f_id = find_file_id(&f_key);
+  u32 f_id = get_file_id(f_val);
   if (!f_id) {
     bpf_printk("cannot get file id");
     return 0;
