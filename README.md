@@ -4,10 +4,16 @@ A tool for detecting which files are being accessed by running processes in a Li
 
 ## Quick Start
 
+Start a nix shell with all required dependencies:
+
+```
+$ nix develop
+```
+
 Run the tracer to start collecting file access data:
 
 ```
-$ go run -exec sudo cmd/cli/main.go tracer
+$ make run-tracer
 ```
 
 Find out which files are being accessed by processes using the `file_access` map:
