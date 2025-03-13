@@ -8,7 +8,6 @@
 
 #include "bpf_kfuncs.h"
 #include "types.h"
-#include "xxhash.h"
 #include "fasthash.h"
 
 #define MAX_NUM_MOUNT_NS  1024
