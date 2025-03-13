@@ -21,7 +21,7 @@
         with pkgs; {
           devShells = {
             default = mkShell {
-              buildInputs = [clang-tools_14 libbpf clang_14 llvm_14 bpftools bear];
+              buildInputs = [go clang-tools_14 libbpf clang_14 llvm_14 bpftools bear];
               nativeBuildInputs = [linuxHeaders];
               hardeningDisable = ["all"];
               NIX_CFLAGS_COMPILE = ["-Wno-unused-command-line-argument"];
