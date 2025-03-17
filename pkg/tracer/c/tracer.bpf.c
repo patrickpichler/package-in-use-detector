@@ -38,7 +38,7 @@ struct string_key {
 };
 
 struct string_value {
-  char str[MAX_STRING_LEN];
+  u8 str[MAX_STRING_LEN];
   u32 collision_counter;
 };
 
@@ -211,6 +211,8 @@ static __always_inline u32 get_string_id(struct qstr str)
       key.hash = fasthash32(val->str, sizeof(val->str), 0);
       break;
   }
+
+  key.hash |= 1L << 31;
 
   if (bpf_map_update_elem(&strings, &key, val, BPF_NOEXIST)) {
     struct string_value *existing = bpf_map_lookup_elem(&strings, &key);

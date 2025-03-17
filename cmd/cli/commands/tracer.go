@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"gitlab.com/castai/package-in-use-detector/pkg/tracer"
+	"golang.org/x/sync/errgroup"
 )
 
 func TracerCommand(log *slog.Logger) *cobra.Command {
@@ -30,6 +31,12 @@ func runTracer(ctx context.Context, log *slog.Logger) error {
 		return fmt.Errorf("error while loading tracer: %w", err)
 	}
 	defer tracer.Close()
+
+	grp, ctx := errgroup.WithContext(ctx)
+
+	grp.Go(func() error {
+		return tracer.Export(ctx)
+	})
 
 	fmt.Println("init...")
 	if err := tracer.Init(); err != nil {
