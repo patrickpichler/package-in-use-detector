@@ -9,6 +9,7 @@
 #include "bpf_kfuncs.h"
 #include "types.h"
 #include "fasthash.h"
+#include "jhash.h"
 
 #define MAX_NUM_MOUNT_NS  1024
 #define MAX_FILES_TRACKED 8192
@@ -17,6 +18,8 @@
 #define MAX_STRING_LEN 255
 
 #define BUF_SIZE 1024
+
+#define hash(ptr, len, seed) jhash(ptr, len, seed)
 
 struct config {
   u32 current_file_access_idx;
@@ -146,7 +149,7 @@ static __always_inline u32 get_file_id(struct file_value *val)
 {
   struct file_key key = {0};
 
-  key.hash = fasthash32(val->path.parts, sizeof(val->path.parts), 0);
+  key.hash = hash(val->path.parts, sizeof(val->path.parts), 0);
 
   if (bpf_map_update_elem(&files, &key, val, BPF_NOEXIST)) {
     struct file_value *existing = bpf_map_lookup_elem(&files, &key);
@@ -205,16 +208,16 @@ static __always_inline u32 get_string_id(struct qstr str)
   // just calculating the has over the full buffer.
   switch (str_len) {
     case 0 ... 32:
-      key.hash = fasthash32(val->str, 32, 0);
+      key.hash = hash(val->str, 32, 0);
       break;
     case 33 ... 64:
-      key.hash = fasthash32(val->str, 64, 0);
+      key.hash = hash(val->str, 64, 0);
       break;
     case 65 ... 128:
-      key.hash = fasthash32(val->str, 128, 0);
+      key.hash = hash(val->str, 128, 0);
       break;
-    default:
-      key.hash = fasthash32(val->str, sizeof(val->str), 0);
+    case 129 ... sizeof(val->str):
+      key.hash = hash(val->str, sizeof(val->str), 0);
       break;
   }
 
