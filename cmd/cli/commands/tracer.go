@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os/signal"
 	"syscall"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 	"gitlab.com/castai/package-in-use-detector/pkg/tracer"
 	"golang.org/x/sync/errgroup"
@@ -49,6 +51,9 @@ func runTracer(ctx context.Context, log *slog.Logger) error {
 		return fmt.Errorf("error while attaching tracer: %w", err)
 	}
 	fmt.Println("attach done...")
+
+	http.Handle("/metrics", promhttp.Handler())
+	http.ListenAndServe(":8080", nil)
 
 	select {
 	case <-ctx.Done():

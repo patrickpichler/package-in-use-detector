@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sys/unix"
 )
 
@@ -121,13 +122,22 @@ func (t *Tracer) snapshotStrings() (map[hash]string, error) {
 	var key tracerStringKey
 	var val tracerStringValue
 
+	var collisions uint64
+
 	for iter.Next(&key, &val) {
 		result[key.Hash] = unix.ByteSliceToString(val.Str[:])
+
+		if val.CollisionCounter > 0 {
+			collisions += uint64(val.CollisionCounter)
+		}
 	}
 
 	if iter.Err() != nil {
 		return nil, iter.Err()
 	}
+
+	MapSize.With(prometheus.Labels{"type": "strings"}).Set(float64(len(result)))
+	Collisions.With(prometheus.Labels{"type": "strings"}).Set(float64(collisions))
 
 	return result, nil
 }
@@ -145,6 +155,7 @@ func resolveFileAccess(log *slog.Logger, stringLookup map[hash]string, fileLooku
 		file, found := fileLookup[key.FileId]
 		if !found {
 			log.Warn("file not found", slog.Any("file_id", key.FileId))
+			Missing.With(prometheus.Labels{"type": "files"}).Add(1)
 			continue
 		}
 
@@ -162,6 +173,8 @@ func resolveFiles(log *slog.Logger, stringLookup map[uint32]string, rawFiles map
 	result := map[uint32]file{}
 
 	var fileStringBuf [16]string
+
+	var collisions uint64
 
 outer:
 	for key, val := range rawFiles {
@@ -181,6 +194,7 @@ outer:
 				s, found := stringLookup[v]
 				if !found {
 					log.Warn("unknown string", slog.Any("hash", v))
+					Missing.With(prometheus.Labels{"type": "strings"}).Add(1)
 					// It can happen that we are missing strings, as it is not a atomic operation to
 					// load strings and files. It is safe to continue here, as we should get the string
 					// in the next iteration.
@@ -208,8 +222,12 @@ outer:
 
 		if val.CollisionCounter > 0 {
 			log.Warn("encountered collision", slog.String("path", result[key.Hash].path))
+			collisions += uint64(val.CollisionCounter)
 		}
 	}
+
+	MapSize.With(prometheus.Labels{"type": "files"}).Set(float64(len(result)))
+	Collisions.With(prometheus.Labels{"type": "files"}).Set(float64(collisions))
 
 	return result
 }
