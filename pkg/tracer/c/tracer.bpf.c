@@ -19,11 +19,7 @@
 #define BUF_SIZE 1024
 
 struct config {
-  u64 current_string_id;
-  u64 max_string_reached;
-
-  u64 current_file_id;
-  u64 max_file_reached;
+  u32 current_file_access_idx;
 };
 
 struct {
@@ -86,12 +82,22 @@ struct file_access_value {
   u8 counter;
 };
 
+// Required to force BTF creation.
+struct file_access_key unusd_file_access_key __attribute__((unused));
+struct file_access_value unusd_file_access_val __attribute__((unused));
+
 struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, MAX_FILE_ACCESS);
-  __type(key, struct file_access_key);
-  __type(value, struct file_access_value);
-} file_access SEC(".maps");
+  __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+  __uint(max_entries, 2);
+  __type(key, u32);
+  __array(
+    values, struct {
+      __uint(type, BPF_MAP_TYPE_LRU_HASH);
+      __uint(max_entries, MAX_FILE_ACCESS);
+      __type(key, struct file_access_key);
+      __type(value, struct file_access_value);
+    });
+} file_access_buffer_map SEC(".maps");
 
 struct {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -362,9 +368,19 @@ int BPF_KPROBE(security_file_open, struct file *file)
   BPF_CORE_READ_INTO(&key.pid, t, pid);
   BPF_CORE_READ_INTO(&key.process_start_time, t, start_time);
 
+  struct config *config = bpf_map_lookup_elem(&config_map, &zero);
+  if (!config)
+    return 0;
+
+  void *file_access_map =
+    bpf_map_lookup_elem(&file_access_buffer_map, &config->current_file_access_idx);
+  if (!file_access_map) {
+    return 0;
+  }
+
   struct file_access_value counter = {0};
 
-  bpf_map_update_elem(&file_access, &key, &counter, BPF_ANY);
+  bpf_map_update_elem(file_access_map, &key, &counter, BPF_ANY);
 
   return 0;
 }

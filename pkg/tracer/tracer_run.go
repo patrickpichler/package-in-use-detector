@@ -3,6 +3,7 @@ package tracer
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -35,7 +36,7 @@ func (t *Tracer) Export(ctx context.Context) error {
 			return nil
 		}
 
-		rawFileAccess, err := snapshotMap[tracerFileAccessKey, tracerFileAccessValue](t.objs.tracerMaps.FileAccess)
+		rawFileAccess, err := t.collectFileAccess()
 		if err != nil {
 			return err
 		}
@@ -47,7 +48,7 @@ func (t *Tracer) Export(ctx context.Context) error {
 
 		strings, err := t.snapshotStrings()
 		if err != nil {
-			t.log.Error("error while snapotting strings", slog.Any("error", err))
+			t.log.Error("error while snapshotting strings", slog.Any("error", err))
 		}
 
 		files := resolveFiles(t.log, strings, rawFiles)
@@ -63,6 +64,53 @@ func (t *Tracer) Export(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (t *Tracer) collectFileAccess() (map[tracerFileAccessKey]tracerFileAccessValue, error) {
+	var config tracerConfig
+
+	zero := uint32(0)
+
+	err := t.objs.ConfigMap.Lookup(zero, &config)
+	if err != nil {
+		return nil, fmt.Errorf("error while config lookup: %w", err)
+	}
+
+	numEntries := t.objs.FileAccessBufferMap.MaxEntries()
+	indexToCollect := config.CurrentFileAccessIdx
+
+	config.CurrentFileAccessIdx = (config.CurrentFileAccessIdx + 1) % numEntries
+
+	err = t.objs.ConfigMap.Update(zero, &config, ebpf.UpdateExist)
+	if err != nil {
+		return nil, fmt.Errorf("error while updating config: %w", err)
+	}
+
+	innerMapSpec := t.mapSpecs.fileAccessSpec.InnerMap.Copy()
+	if innerMapSpec == nil {
+		return nil, errors.New("error: no inner map spec for `fileAccess`")
+	}
+	innerMapSpec.Name = fmt.Sprintf("file_acc_%d", indexToCollect)
+
+	newMap, err := ebpf.NewMap(innerMapSpec)
+	if err != nil {
+		return nil, fmt.Errorf("error while creating new inner map: %w", err)
+	}
+	defer newMap.Close()
+
+	var fileAccessMap *ebpf.Map
+	err = t.objs.FileAccessBufferMap.Lookup(indexToCollect, &fileAccessMap)
+	if err != nil {
+		return nil, fmt.Errorf("error while getting existing map: %w", err)
+	}
+	defer fileAccessMap.Close()
+
+	err = t.objs.FileAccessBufferMap.Update(indexToCollect, newMap, ebpf.UpdateAny)
+	if err != nil {
+		return nil, fmt.Errorf("error while replacing existing map: %w", err)
+	}
+
+	return snapshotMap[tracerFileAccessKey, tracerFileAccessValue](fileAccessMap)
 }
 
 func (t *Tracer) snapshotStrings() (map[hash]string, error) {
@@ -115,6 +163,7 @@ func resolveFiles(log *slog.Logger, stringLookup map[uint32]string, rawFiles map
 
 	var fileStringBuf [16]string
 
+outer:
 	for key, val := range rawFiles {
 		for idx, v := range val.Path.Parts[:] {
 			if v == 0 {
@@ -126,10 +175,16 @@ func resolveFiles(log *slog.Logger, stringLookup map[uint32]string, rawFiles map
 
 			var str string
 
+			// If the MSB is set, we know that the ID we got needs to be resovled, if it is
+			// not set, the ID contains a backed path.
 			if v&(1<<31) != 0 {
 				s, found := stringLookup[v]
 				if !found {
 					log.Warn("unknown string", slog.Any("hash", v))
+					// It can happen that we are missing strings, as it is not a atomic operation to
+					// load strings and files. It is safe to continue here, as we should get the string
+					// in the next iteration.
+					continue outer
 				}
 				str = s
 			} else {

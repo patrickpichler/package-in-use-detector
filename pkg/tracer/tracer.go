@@ -21,10 +21,15 @@ type tracerEBPFLinks struct {
 	securityFileOpenLink link.Link
 }
 
+type tracerEBPFMapSpec struct {
+	fileAccessSpec *ebpf.MapSpec
+}
+
 type Tracer struct {
 	log          *slog.Logger
 	programLinks *tracerEBPFLinks
 	objs         *tracerObjects
+	mapSpecs     tracerEBPFMapSpec
 	initialized  atomic.Bool
 	initMu       sync.Mutex
 }
@@ -45,9 +50,24 @@ func (t *Tracer) load() error {
 		return fmt.Errorf("error loading tracer bpf spec: %w", err)
 	}
 
+	mapBufferSpec, found := spec.Maps["file_access_buffer_map"]
+	if !found {
+		return fmt.Errorf("error file_access_buffer_map spec not found")
+	}
+
+	t.mapSpecs.fileAccessSpec = mapBufferSpec
+	fileAccessBuffer, err := buildFileAccessBufferMap(mapBufferSpec)
+	if err != nil {
+		return fmt.Errorf("error while building file access map buffer: %w", err)
+	}
+
 	var objs tracerObjects
 
-	if err := spec.LoadAndAssign(&objs, &ebpf.CollectionOptions{}); err != nil {
+	if err := spec.LoadAndAssign(&objs, &ebpf.CollectionOptions{
+		MapReplacements: map[string]*ebpf.Map{
+			"file_access_buffer_map": fileAccessBuffer,
+		},
+	}); err != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
 			t.log.Error(fmt.Sprintf("Verifier error: %+v", ve))
@@ -59,6 +79,31 @@ func (t *Tracer) load() error {
 	t.objs = &objs
 
 	return nil
+}
+
+func buildFileAccessBufferMap(origSpec *ebpf.MapSpec) (*ebpf.Map, error) {
+	spec := origSpec.Copy()
+	spec.Contents = make([]ebpf.MapKV, spec.MaxEntries)
+
+	for i := uint32(0); i < spec.MaxEntries; i++ {
+		innerSpec := spec.InnerMap.Copy()
+		innerSpec.Name = fmt.Sprintf("file_acc_%d", i)
+
+		innerMap, err := ebpf.NewMap(innerSpec)
+		if err != nil {
+			return nil, err
+		}
+		defer innerMap.Close()
+
+		spec.Contents[i] = ebpf.MapKV{Key: i, Value: innerMap}
+	}
+
+	outerMap, err := ebpf.NewMap(spec)
+	if err != nil {
+		return nil, err
+	}
+
+	return outerMap, nil
 }
 
 func (t *Tracer) attach() error {
@@ -86,6 +131,10 @@ func (t *Tracer) Init() error {
 		return fmt.Errorf("error during load: %w", err)
 	}
 
+	return nil
+}
+
+func (t *Tracer) Attach() error {
 	if err := t.attach(); err != nil {
 		return fmt.Errorf("error during attaching: %w", err)
 	}

@@ -12,12 +12,7 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type tracerConfig struct {
-	CurrentStringId  uint64
-	MaxStringReached uint64
-	CurrentFileId    uint64
-	MaxFileReached   uint64
-}
+type tracerConfig struct{ CurrentFileAccessIdx uint32 }
 
 type tracerFileAccessKey struct {
 	MntNs            uint32
@@ -93,19 +88,21 @@ type tracerProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tracerMapSpecs struct {
-	ConfigMap          *ebpf.MapSpec `ebpf:"config_map"`
-	FileAccess         *ebpf.MapSpec `ebpf:"file_access"`
-	FilePathScratch    *ebpf.MapSpec `ebpf:"file_path_scratch"`
-	FileValueScratch   *ebpf.MapSpec `ebpf:"file_value_scratch"`
-	Files              *ebpf.MapSpec `ebpf:"files"`
-	StringValueScratch *ebpf.MapSpec `ebpf:"string_value_scratch"`
-	Strings            *ebpf.MapSpec `ebpf:"strings"`
+	ConfigMap           *ebpf.MapSpec `ebpf:"config_map"`
+	FileAccessBufferMap *ebpf.MapSpec `ebpf:"file_access_buffer_map"`
+	FilePathScratch     *ebpf.MapSpec `ebpf:"file_path_scratch"`
+	FileValueScratch    *ebpf.MapSpec `ebpf:"file_value_scratch"`
+	Files               *ebpf.MapSpec `ebpf:"files"`
+	StringValueScratch  *ebpf.MapSpec `ebpf:"string_value_scratch"`
+	Strings             *ebpf.MapSpec `ebpf:"strings"`
 }
 
 // tracerVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tracerVariableSpecs struct {
+	UnusdFileAccessKey *ebpf.VariableSpec `ebpf:"unusd_file_access_key"`
+	UnusdFileAccessVal *ebpf.VariableSpec `ebpf:"unusd_file_access_val"`
 }
 
 // tracerObjects contains all objects after they have been loaded into the kernel.
@@ -128,19 +125,19 @@ func (o *tracerObjects) Close() error {
 //
 // It can be passed to loadTracerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tracerMaps struct {
-	ConfigMap          *ebpf.Map `ebpf:"config_map"`
-	FileAccess         *ebpf.Map `ebpf:"file_access"`
-	FilePathScratch    *ebpf.Map `ebpf:"file_path_scratch"`
-	FileValueScratch   *ebpf.Map `ebpf:"file_value_scratch"`
-	Files              *ebpf.Map `ebpf:"files"`
-	StringValueScratch *ebpf.Map `ebpf:"string_value_scratch"`
-	Strings            *ebpf.Map `ebpf:"strings"`
+	ConfigMap           *ebpf.Map `ebpf:"config_map"`
+	FileAccessBufferMap *ebpf.Map `ebpf:"file_access_buffer_map"`
+	FilePathScratch     *ebpf.Map `ebpf:"file_path_scratch"`
+	FileValueScratch    *ebpf.Map `ebpf:"file_value_scratch"`
+	Files               *ebpf.Map `ebpf:"files"`
+	StringValueScratch  *ebpf.Map `ebpf:"string_value_scratch"`
+	Strings             *ebpf.Map `ebpf:"strings"`
 }
 
 func (m *tracerMaps) Close() error {
 	return _TracerClose(
 		m.ConfigMap,
-		m.FileAccess,
+		m.FileAccessBufferMap,
 		m.FilePathScratch,
 		m.FileValueScratch,
 		m.Files,
@@ -153,6 +150,8 @@ func (m *tracerMaps) Close() error {
 //
 // It can be passed to loadTracerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tracerVariables struct {
+	UnusdFileAccessKey *ebpf.Variable `ebpf:"unusd_file_access_key"`
+	UnusdFileAccessVal *ebpf.Variable `ebpf:"unusd_file_access_val"`
 }
 
 // tracerPrograms contains all programs after they have been loaded into the kernel.

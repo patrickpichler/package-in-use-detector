@@ -32,17 +32,23 @@ func runTracer(ctx context.Context, log *slog.Logger) error {
 	}
 	defer tracer.Close()
 
+	fmt.Println("init...")
+	if err := tracer.Init(); err != nil {
+		return fmt.Errorf("error while initializing tracer: %w", err)
+	}
+	fmt.Println("init done...")
+
 	grp, ctx := errgroup.WithContext(ctx)
 
 	grp.Go(func() error {
 		return tracer.Export(ctx)
 	})
 
-	fmt.Println("init...")
-	if err := tracer.Init(); err != nil {
-		return fmt.Errorf("error while initializing tracer: %w", err)
+	fmt.Println("attach...")
+	if err := tracer.Attach(); err != nil {
+		return fmt.Errorf("error while attaching tracer: %w", err)
 	}
-	fmt.Println("init done...")
+	fmt.Println("attach done...")
 
 	select {
 	case <-ctx.Done():
