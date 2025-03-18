@@ -66,3 +66,16 @@ $ bpftool map dump name files | jq '.[] | select(.key.hash==1205480266)'
   }
 }
 ```
+
+The tracer will also record various metrics, that can be queried by the following command:
+```
+$ curl localhost:8080/metrics --silent | grep package
+# HELP package_in_use_collisions Gauge for amount of collisions in files
+# TYPE package_in_use_collisions gauge
+package_in_use_collisions{type="files"} 0
+package_in_use_collisions{type="strings"} 0
+# HELP package_in_use_map_size Gauge for map size
+# TYPE package_in_use_map_size gauge
+package_in_use_map_size{type="files"} 2938
+package_in_use_map_size{type="strings"} 1061
+```
