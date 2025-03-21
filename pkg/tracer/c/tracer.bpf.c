@@ -19,8 +19,6 @@
 
 #define BUF_SIZE 1024
 
-#define hash(ptr, len, seed) jhash(ptr, len, seed)
-
 struct config {
   u32 current_file_access_idx;
 };
@@ -90,9 +88,7 @@ struct {
 #define MAX_FILE_ACCESS 65535
 
 struct file_access_key {
-  u32 mnt_ns;
-  pid_t pid;
-  u64 process_start_time;
+  u64 cgroup_id;
   u32 file_id;
 };
 
@@ -144,7 +140,7 @@ static __always_inline u32 can_inline(struct string_value *str)
 
 #pragma unroll
   for (int i = 0; i < 5; i++) {
-    if (str->str[i] == '\0') {
+    if (str->str[i] == 0) {
       less_than_four_chars = true;
       break;
     }
@@ -164,7 +160,7 @@ static __always_inline u32 get_file_id(struct file_value *val)
 {
   struct file_key key = {0};
 
-  key.hash = hash(val->path.parts, sizeof(val->path.parts), 0);
+  key.hash = jhash2(val->path.parts, sizeof(val->path.parts) / sizeof(u32), 0);
 
   if (bpf_map_update_elem(&files, &key, val, BPF_NOEXIST)) {
     struct file_value *existing = bpf_map_lookup_elem(&files, &key);
@@ -418,10 +414,7 @@ int BPF_KPROBE(security_file_open, struct file *file)
     key.file_id = f_id;
   }
 
-  struct task_struct *t = (void *) bpf_get_current_task();
-
-  BPF_CORE_READ_INTO(&key.pid, t, pid);
-  BPF_CORE_READ_INTO(&key.process_start_time, t, start_time);
+  key.cgroup_id = bpf_get_current_cgroup_id();
 
   struct config *config = bpf_map_lookup_elem(&config_map, &zero);
   if (!config)

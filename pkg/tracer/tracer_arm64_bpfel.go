@@ -15,11 +15,9 @@ import (
 type tracerConfig struct{ CurrentFileAccessIdx uint32 }
 
 type tracerFileAccessKey struct {
-	MntNs            uint32
-	Pid              int32
-	ProcessStartTime uint64
-	FileId           uint32
-	_                [4]byte
+	CgroupId uint64
+	FileId   uint32
+	_        [4]byte
 }
 
 type tracerFileAccessValue struct{ Counter uint8 }

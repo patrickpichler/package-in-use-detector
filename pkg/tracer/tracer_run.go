@@ -23,7 +23,7 @@ type processKey struct {
 	startTime uint64
 }
 
-type mountNsId = uint32
+type cgroupID = uint64
 
 type hash = uint32
 
@@ -57,11 +57,9 @@ func (t *Tracer) Export(ctx context.Context) error {
 
 		for k, v := range fileAccess {
 			fmt.Println(k, "recorded file access", len(v))
-			for pk, v2 := range v {
-				fmt.Println("====== Process", pk.pid, pk.startTime)
-				for _, f := range v2 {
-					fmt.Println(f.path)
-				}
+			fmt.Println("====== Cgroup", k)
+			for _, f := range v {
+				fmt.Println(f.path)
 			}
 		}
 	}
@@ -142,16 +140,10 @@ func (t *Tracer) snapshotStrings() (map[hash]string, error) {
 	return result, nil
 }
 
-func resolveFileAccess(log *slog.Logger, stringLookup map[hash]string, fileLookup map[hash]file, rawFilesAccess map[tracerFileAccessKey]tracerFileAccessValue) map[mountNsId]map[processKey][]file {
-	result := map[mountNsId]map[processKey][]file{}
+func resolveFileAccess(log *slog.Logger, stringLookup map[hash]string, fileLookup map[hash]file, rawFilesAccess map[tracerFileAccessKey]tracerFileAccessValue) map[cgroupID][]file {
+	result := map[cgroupID][]file{}
 
 	for key, _ := range rawFilesAccess {
-		mntNsMap, found := result[key.MntNs]
-		if !found {
-			mntNsMap = map[processKey][]file{}
-			result[key.MntNs] = mntNsMap
-		}
-
 		file, found := fileLookup[key.FileId]
 		if !found {
 			log.Warn("file not found", slog.Any("file_id", key.FileId))
@@ -159,11 +151,7 @@ func resolveFileAccess(log *slog.Logger, stringLookup map[hash]string, fileLooku
 			continue
 		}
 
-		pKey := processKey{
-			pid:       uint32(key.Pid),
-			startTime: key.ProcessStartTime,
-		}
-		mntNsMap[pKey] = append(mntNsMap[pKey], file)
+		result[key.CgroupId] = append(result[key.CgroupId], file)
 	}
 
 	return result

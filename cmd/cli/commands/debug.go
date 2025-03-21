@@ -44,7 +44,7 @@ func unpackStringIDCommand(log *slog.Logger) *cobra.Command {
 				parseBase = 16
 			}
 
-			parsed, err := strconv.ParseInt(idStr, parseBase, 32)
+			parsed, err := strconv.ParseInt(idStr, parseBase, 33)
 			if err != nil {
 				return fmt.Errorf("cannot parse given numer `%s`: %w", idStr, err)
 			}
