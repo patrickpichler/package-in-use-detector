@@ -34,8 +34,7 @@ type tracerFileValue struct {
 type tracerStringKey struct{ Hash uint32 }
 
 type tracerStringValue struct {
-	Str              [255]uint8
-	_                [1]byte
+	Str              [252]uint8
 	CollisionCounter uint32
 }
 

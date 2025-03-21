@@ -1,7 +1,8 @@
 #ifndef _LINUX_JHASH_H
 #define _LINUX_JHASH_H
 
-#import "types.h"
+#include "types.h"
+#include "bpf/bpf_helpers.h"
 
 /* Copied from $(LINUX)/include/linux/jhash.h (kernel 4.18) */
 
@@ -24,7 +25,7 @@
  * Copyright (C) 2009-2010 Jozsef Kadlecsik (kadlec@blackhole.kfki.hu)
  */
 
-static inline __u32 rol32(__u32 word, unsigned int shift)
+static __always_inline u32 rol32(u32 word, unsigned int shift)
 {
   return (word << shift) | (word >> ((-shift) & 31));
 }
@@ -86,7 +87,7 @@ typedef unsigned int u32;
  *
  * Returns the hash value of the key. The result depends on endianness.
  */
-static inline u32 jhash(const void *key, u32 length, u32 initval)
+static __always_inline u32 jhash(const void *key, u8 length, u32 initval)
 {
   u32 a, b, c;
   const unsigned char *k = key;
@@ -137,6 +138,67 @@ static inline u32 jhash(const void *key, u32 length, u32 initval)
   return c;
 }
 
+/**
+ * This version of jhash will stop hashing on the first encountered null byte
+ * in a part.
+ **/
+static __always_inline u32 jhash_optimized(const void *key, u8 length, u32 initval)
+{
+  u32 a, b, c;
+  const unsigned char *k = key;
+
+  /* Set up the internal state */
+  a = b = c = JHASH_INITVAL + length + initval;
+
+  /* All but the last block: affect some 32 bits of (a,b,c) */
+  while (length > 12 && *k != 0) {
+    a += *(u32 *) (k);
+    b += *(u32 *) (k + 4);
+    c += *(u32 *) (k + 8);
+    __jhash_mix(a, b, c);
+    length -= 12;
+    k += 12;
+  }
+
+  // Exit on first encountered null byte.
+  if (*k == 0) {
+    return c;
+  }
+
+  /* Last block: affect all 32 bits of (c) */
+  switch (length) {
+    case 12:
+      c += (u32) k[11] << 24; /* fall through */
+    case 11:
+      c += (u32) k[10] << 16; /* fall through */
+    case 10:
+      c += (u32) k[9] << 8; /* fall through */
+    case 9:
+      c += k[8]; /* fall through */
+    case 8:
+      b += (u32) k[7] << 24; /* fall through */
+    case 7:
+      b += (u32) k[6] << 16; /* fall through */
+    case 6:
+      b += (u32) k[5] << 8; /* fall through */
+    case 5:
+      b += k[4]; /* fall through */
+    case 4:
+      a += (u32) k[3] << 24; /* fall through */
+    case 3:
+      a += (u32) k[2] << 16; /* fall through */
+    case 2:
+      a += (u32) k[1] << 8; /* fall through */
+    case 1:
+      a += k[0];
+      __jhash_final(a, b, c);
+    case 0: /* Nothing left to add */
+      break;
+  }
+
+  return c;
+}
+
 /* jhash2 - hash an array of u32's
  * @k: the key which must be an array of u32's
  * @length: the number of u32's in the key
@@ -144,7 +206,7 @@ static inline u32 jhash(const void *key, u32 length, u32 initval)
  *
  * Returns the hash value of the key.
  */
-static inline u32 jhash2(const u32 *k, u32 length, u32 initval)
+static __always_inline u32 jhash2(const u32 *k, u8 length, u32 initval)
 {
   u32 a, b, c;
 
@@ -177,8 +239,28 @@ static inline u32 jhash2(const u32 *k, u32 length, u32 initval)
   return c;
 }
 
+static __always_inline u32 jhash2_optimized(const u32 *k, u8 length, u32 initval)
+{
+  u32 a, b, c;
+
+  /* Set up the internal state */
+  a = b = c = JHASH_INITVAL + (length << 2) + initval;
+
+  /* Handle most of the key */
+  while (length > 3) {
+    a += k[0];
+    b += k[1];
+    c += k[2];
+    __jhash_mix(a, b, c);
+    length -= 3;
+    k += 3;
+  }
+
+  return c;
+}
+
 /* __jhash_nwords - hash exactly 3, 2 or 1 word(s) */
-static inline u32 __jhash_nwords(u32 a, u32 b, u32 c, u32 initval)
+static __always_inline u32 __jhash_nwords(u32 a, u32 b, u32 c, u32 initval)
 {
   a += initval;
   b += initval;
@@ -189,17 +271,17 @@ static inline u32 __jhash_nwords(u32 a, u32 b, u32 c, u32 initval)
   return c;
 }
 
-static inline u32 jhash_3words(u32 a, u32 b, u32 c, u32 initval)
+static __always_inline u32 jhash_3words(u32 a, u32 b, u32 c, u32 initval)
 {
   return __jhash_nwords(a, b, c, initval + JHASH_INITVAL + (3 << 2));
 }
 
-static inline u32 jhash_2words(u32 a, u32 b, u32 initval)
+static __always_inline u32 jhash_2words(u32 a, u32 b, u32 initval)
 {
   return __jhash_nwords(a, b, 0, initval + JHASH_INITVAL + (2 << 2));
 }
 
-static inline u32 jhash_1word(u32 a, u32 initval)
+static __always_inline u32 jhash_1word(u32 a, u32 initval)
 {
   return __jhash_nwords(a, 0, 0, initval + JHASH_INITVAL + (1 << 2));
 }

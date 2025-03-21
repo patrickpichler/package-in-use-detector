@@ -15,7 +15,7 @@
 #define MAX_FILES_TRACKED 8192
 
 #define MAX_STRINGS    32768
-#define MAX_STRING_LEN 255
+#define MAX_STRING_LEN 252
 
 #define BUF_SIZE 1024
 
@@ -37,7 +37,10 @@ struct string_key {
 };
 
 struct string_value {
-  u8 str[MAX_STRING_LEN];
+  union {
+    u8 str[MAX_STRING_LEN];
+    u32 str_ints[MAX_STRING_LEN / sizeof(u32)];
+  };
   u32 collision_counter;
 };
 
@@ -183,7 +186,7 @@ static __always_inline u32 get_string_id(struct qstr str)
     return 0;
   }
 
-  __builtin_memset(val->str, 0, 255);
+  __builtin_memset(val->str, 0, sizeof(val->str));
 
   u32 str_len = str.len;
 
@@ -207,18 +210,25 @@ static __always_inline u32 get_string_id(struct qstr str)
   // TODO(patrick.pichler): benchmark if this brings any performance boost over just
   // just calculating the has over the full buffer.
   switch (str_len) {
-    case 0 ... 32:
-      key.hash = hash(val->str, 32, 0);
+    case 0 ... 4: {
+      u32 *ptr = val->str_ints;
+      key.hash = jhash_1word(ptr[0], 0);
       break;
-    case 33 ... 64:
-      key.hash = hash(val->str, 64, 0);
+    }
+    case 5 ... 8: {
+      u32 *ptr = val->str_ints;
+      key.hash = jhash_2words(ptr[0], ptr[1], 0);
       break;
-    case 65 ... 128:
-      key.hash = hash(val->str, 128, 0);
+    }
+    case 9 ... 12: {
+      u32 *ptr = val->str_ints;
+      key.hash = jhash_3words(ptr[0], ptr[1], ptr[2], 0);
       break;
-    case 129 ... sizeof(val->str):
-      key.hash = hash(val->str, sizeof(val->str), 0);
+    }
+    default: {
+      key.hash = jhash_optimized(val->str, sizeof(val->str), 0);
       break;
+    }
   }
 
   key.hash |= 1L << 31;
