@@ -75,6 +75,18 @@ struct {
   __type(value, struct file_value);
 } files SEC(".maps");
 
+struct inode_key {
+  u32 ino;
+  u32 dev;
+};
+
+struct {
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(max_entries, MAX_FILES);
+  __type(key, struct inode_key);
+  __type(value, u32);
+} inode_file_cache SEC(".maps");
+
 #define MAX_FILE_ACCESS 65535
 
 struct file_access_key {
@@ -348,33 +360,63 @@ static __always_inline int get_path(struct path *path, struct file_path *out)
 SEC("kprobe/security_file_open")
 int BPF_KPROBE(security_file_open, struct file *file)
 {
+  struct inode_key ino_key = {0};
+
+  if (BPF_CORE_READ_INTO(&ino_key.ino, file, f_inode, i_ino)) {
+    return 0;
+  }
+
+  if (BPF_CORE_READ_INTO(&ino_key.dev, file, f_inode, i_sb, s_dev)) {
+    return 0;
+  }
+
+  if (!ino_key.ino) {
+    return 0;
+  }
+
   struct path path;
   struct file_access_key key = {0};
   struct file_value *f_val;
   u32 zero = 0;
+  u32 *cached_file_id = 0;
 
-  f_val = bpf_map_lookup_elem(&file_value_scratch, &zero);
-  if (!f_val) {
-    bpf_printk("cannot get file scratch");
-    return 0;
+  cached_file_id = bpf_map_lookup_elem(&inode_file_cache, &ino_key);
+  if (cached_file_id) {
+    struct file_key f_key = {.hash = *cached_file_id};
+    f_val = bpf_map_lookup_elem(&files, &f_key);
+    // TODO(patrick.pichler): handle this case better by recomputing
+    if (!f_val) {
+      bpf_printk("cache is pointing to dead file val");
+      return 0;
+    }
+
+    key.file_id = f_key.hash;
+  } else {
+    f_val = bpf_map_lookup_elem(&file_value_scratch, &zero);
+    if (!f_val) {
+      bpf_printk("cannot get file scratch");
+      return 0;
+    }
+
+    __builtin_memset(&f_val->path, 0, sizeof(f_val->path));
+
+    BPF_CORE_READ_INTO(&path, file, f_path);
+
+    if (!get_path(&path, &f_val->path)) {
+      bpf_printk("cannot get filepath");
+      return 0;
+    }
+
+    u32 f_id = get_file_id(f_val);
+    if (!f_id) {
+      bpf_printk("cannot get file id");
+      return 0;
+    }
+
+    bpf_map_update_elem(&inode_file_cache, &ino_key, &f_id, BPF_ANY);
+
+    key.file_id = f_id;
   }
-
-  __builtin_memset(&f_val->path, 0, sizeof(f_val->path));
-
-  BPF_CORE_READ_INTO(&path, file, f_path);
-
-  if (!get_path(&path, &f_val->path)) {
-    bpf_printk("cannot get filepath");
-    return 0;
-  }
-
-  u32 f_id = get_file_id(f_val);
-  if (!f_id) {
-    bpf_printk("cannot get file id");
-    return 0;
-  }
-
-  key.file_id = f_id;
 
   struct task_struct *t = (void *) bpf_get_current_task();
 
