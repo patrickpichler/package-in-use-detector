@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -146,4 +147,30 @@ func (t *Tracer) Close() {
 	if t.programLinks != nil {
 		t.programLinks.securityFileOpenLink.Close()
 	}
+}
+
+func (t *Tracer) IgnorePath(path string) error {
+	// We only care about the path components not any slashes.
+	path = strings.Trim(path, "/")
+
+	parts := strings.Split(path, "/")
+
+	if len(parts) > 16 {
+		return fmt.Errorf("cannot ignore paths with more than 16 parts, got %d", len(parts))
+	}
+
+	var key tracerFilePath
+	var value uint32 = 1
+
+	for i, v := range parts {
+		key.Parts[i] = ToHashedId(v)
+	}
+
+	fmt.Println("===> ignored path", path, key.Parts)
+
+	if err := t.objs.tracerMaps.IgnoredPaths.Put(&key, &value); err != nil {
+		return fmt.Errorf("error putting path to ignored map: %w", err)
+	}
+
+	return nil
 }

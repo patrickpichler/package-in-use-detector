@@ -8,7 +8,6 @@
 
 #include "bpf_kfuncs.h"
 #include "types.h"
-#include "fasthash.h"
 #include "jhash.h"
 
 #define MAX_NUM_MOUNT_NS  1024
@@ -62,6 +61,8 @@ struct file_key {
 struct file_value {
   struct file_path path;
   u32 collision_counter;
+  // TODO(patrick.pichler): some statistics might be interesting, but for now this is fine.
+  u8 ignored;
 };
 
 #define MAX_FILES 65535
@@ -84,6 +85,16 @@ struct {
   __type(key, struct inode_key);
   __type(value, u32);
 } inode_file_cache SEC(".maps");
+
+#define MAX_IGNORED_PATHS 1024
+
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, MAX_IGNORED_PATHS);
+  __type(key, struct file_path);
+  __type(value, u32);
+  __uint(map_flags, BPF_F_NO_PREALLOC);
+} ignored_paths SEC(".maps");
 
 #define MAX_FILE_ACCESS 65535
 
@@ -124,7 +135,7 @@ struct {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
   __uint(max_entries, 1);
   __type(key, u32);
-  __type(value, u32[MAX_PATH_COMPONENTS]);
+  __type(value, struct dentry *[MAX_PATH_COMPONENTS]);
 } file_path_scratch SEC(".maps");
 
 struct {
@@ -148,7 +159,7 @@ static __always_inline u32 can_inline(struct string_value *str)
 
   // We cannot inline values with the MSB in the fourth char set, as this bit
   // is used to mark if the id is inlined or not.
-  if (less_than_four_chars && str->str[3] & 1 << 7) {
+  if (less_than_four_chars && str->str[0] & 1 << 7) {
     bpf_printk("cannot inline since forth str is %d", str->str[3]);
     return 0;
   }
@@ -160,7 +171,7 @@ static __always_inline u32 get_file_id(struct file_value *val)
 {
   struct file_key key = {0};
 
-  key.hash = jhash2(val->path.parts, sizeof(val->path.parts) / sizeof(u32), 0);
+  key.hash = jenkins_one_at_a_time(val->path.parts, sizeof(val->path.parts));
 
   if (bpf_map_update_elem(&files, &key, val, BPF_NOEXIST)) {
     struct file_value *existing = bpf_map_lookup_elem(&files, &key);
@@ -213,33 +224,15 @@ static __always_inline u32 get_string_id(struct qstr str)
     return id;
   }
 
+  bool debug = false;
+
+  debug = str_len == 13 && val->str[0] == 'k' && val->str[1] == 'u' && val->str[2] == 'b';
+
   struct string_key key = {0};
 
-  // TODO(patrick.pichler): benchmark if this brings any performance boost over just
-  // just calculating the has over the full buffer.
-  switch (str_len) {
-    case 0 ... 4: {
-      u32 *ptr = val->str_ints;
-      key.hash = jhash_1word(ptr[0], 0);
-      break;
-    }
-    case 5 ... 8: {
-      u32 *ptr = val->str_ints;
-      key.hash = jhash_2words(ptr[0], ptr[1], 0);
-      break;
-    }
-    case 9 ... 12: {
-      u32 *ptr = val->str_ints;
-      key.hash = jhash_3words(ptr[0], ptr[1], ptr[2], 0);
-      break;
-    }
-    default: {
-      key.hash = jhash_optimized(val->str, sizeof(val->str), 0);
-      break;
-    }
-  }
+  key.hash = jenkins_one_at_a_time(val->str, str_len);
 
-  key.hash |= 1L << 31;
+  key.hash |= bpf_htonl(1L << 31);
 
   if (bpf_map_update_elem(&strings, &key, val, BPF_NOEXIST)) {
     struct string_value *existing = bpf_map_lookup_elem(&strings, &key);
@@ -276,17 +269,17 @@ static __always_inline int get_path(struct path *path, struct file_path *out)
   struct dentry *d_parent;
   struct qstr d_name;
   int sz;
-  int current = 0;
   u32 zero = 0;
-  u32 *parts;
+  struct dentry **parts;
   char name[255];
+  int current = MAX_PATH_COMPONENTS - 1;
 
   parts = bpf_map_lookup_elem(&file_path_scratch, &zero);
   if (!parts) {
     return 0;
   }
 
-  __builtin_memset(parts, 0, 32);
+  __builtin_memset(parts, 0, sizeof(parts) * MAX_PATH_COMPONENTS);
 
 #pragma unroll
   for (int i = 0; i < MAX_PATH_COMPONENTS; i++) {
@@ -315,34 +308,48 @@ static __always_inline int get_path(struct path *path, struct file_path *out)
       break;
     }
 
+    parts[current] = dentry;
+    dentry = d_parent;
+
+    if (current == 0) {
+      return 0;
+    }
+
+    current--;
+  }
+
+  if (current == MAX_PATH_COMPONENTS) {
+    return 0;
+  }
+
+  u8 parts_idx = current + 1;
+
+  for (u8 i = 0; i < MAX_PATH_COMPONENTS; i++) {
+    if (parts_idx >= MAX_PATH_COMPONENTS) {
+      break;
+    }
+
+    if (i == current) {
+      break;
+    }
+
+    struct dentry *dentry = parts[parts_idx++];
+
     // Add this dentry name to path
     BPF_CORE_READ_INTO(&d_name, dentry, d_name);
 
-    // TODO(patrick.pichler): split up getting id and interning string in order to allow for proper
-    // ignore of folders.
     u32 id = get_string_id(d_name);
-
     if (!id) {
       bpf_printk("no id");
       // Something is broken and we cannot get the ID
       return 0;
     }
 
-    if (current > MAX_PATH_COMPONENTS) {
-      return 0;
+    out->parts[i] = id;
+
+    if (bpf_map_lookup_elem(&ignored_paths, out)) {
+      return 2;
     }
-
-    parts[current] = id;
-    dentry = d_parent;
-    current++;
-  }
-
-  if (current == 0 || current == MAX_PATH_COMPONENTS) {
-    return 0;
-  }
-
-  for (int i = 0; i < current; i++) {
-    out->parts[current - i - 1] = parts[i];
   }
 
   // memfd files have no path in the filesystem -> extract their name
@@ -376,6 +383,10 @@ int BPF_KPROBE(security_file_open, struct file *file)
   u32 zero = 0;
   u32 *cached_file_id = 0;
 
+  // Inode cache is not optimal to use, as there can be different names for inodes.
+  // E.g. in the cgroups fs, the cgroup folder has the same inode as the cgroup it represents,
+  // also hardlinks exist.
+  // TODO(patrick.pichler): think about a better approach to this
   cached_file_id = bpf_map_lookup_elem(&inode_file_cache, &ino_key);
   if (cached_file_id) {
     struct file_key f_key = {.hash = *cached_file_id};
@@ -398,9 +409,16 @@ int BPF_KPROBE(security_file_open, struct file *file)
 
     BPF_CORE_READ_INTO(&path, file, f_path);
 
-    if (!get_path(&path, &f_val->path)) {
+    int res = get_path(&path, &f_val->path);
+    if (!res) {
       bpf_printk("cannot get filepath");
       return 0;
+    }
+
+    // TODO(patrick.pichler): this is currently not concerned with updating already existing
+    // files and set them to ignored. It is fine for now, but needs to be handled later.
+    if (res == 2) {
+      f_val->ignored = 1;
     }
 
     u32 f_id = get_file_id(f_val);

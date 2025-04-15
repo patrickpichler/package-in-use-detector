@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: package-in-use-poc
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: package-in-use-tracer
+  namespace: package-in-use-poc
+  annotations:
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+    prometheus.io/scrape: "true"
+  labels:
+    app: package-in-use-tracer
+spec:
+  selector:
+    matchLabels:
+      app: package-in-use-tracer
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container:  package-in-use-tracer
+      labels:
+        app: package-in-use-tracer
+    spec:
+      tolerations:
+      containers:
+      - name: package-in-use-tracer
+        image: ghcr.io/patrickpichler/package-in-use-detector/cli-d9a02904b81cd4e2794066b5f1949e92:latest
+        args:
+          - "tracer"
+          - "run"
+        resources:
+          limits:
+            memory: 200Mi
+          requests:
+            cpu: 100m
+            memory: 200Mi
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+          privileged: true
+      terminationGracePeriodSeconds: 30

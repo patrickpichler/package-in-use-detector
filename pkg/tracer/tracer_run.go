@@ -15,7 +15,9 @@ import (
 )
 
 type file struct {
-	path string
+	path    string
+	rawPath tracerFilePath
+	ignored bool
 }
 
 type processKey struct {
@@ -59,7 +61,7 @@ func (t *Tracer) Export(ctx context.Context) error {
 			fmt.Println(k, "recorded file access", len(v))
 			fmt.Println("====== Cgroup", k)
 			for _, f := range v {
-				fmt.Println(f.path)
+				fmt.Println(f.ignored, f.path, f.rawPath.Parts)
 			}
 		}
 	}
@@ -170,6 +172,10 @@ outer:
 			if v == 0 {
 				result[key.Hash] = file{
 					path: "/" + strings.Join(fileStringBuf[:idx], "/"),
+					rawPath: tracerFilePath{
+						Parts: val.Path.Parts,
+					},
+					ignored: val.Ignored > 0,
 				}
 				break
 			}
@@ -178,7 +184,7 @@ outer:
 
 			// If the MSB is set, we know that the ID we got needs to be resovled, if it is
 			// not set, the ID contains a backed path.
-			if v&(1<<31) != 0 {
+			if v&inlineIdMask != 0 {
 				s, found := stringLookup[v]
 				if !found {
 					log.Warn("unknown string", slog.Any("hash", v))

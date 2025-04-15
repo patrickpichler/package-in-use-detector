@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"gitlab.com/castai/package-in-use-detector/pkg/tracer"
 )
 
 func DebugCommand(log *slog.Logger) *cobra.Command {
@@ -15,12 +16,15 @@ func DebugCommand(log *slog.Logger) *cobra.Command {
 		Use: "debug",
 	}
 
-	cmd.AddCommand(unpackStringIDCommand(log))
+	cmd.AddCommand(
+		unpackStringIDCommand(),
+		stringIDCommand(log),
+	)
 
 	return cmd
 }
 
-func unpackStringIDCommand(log *slog.Logger) *cobra.Command {
+func unpackStringIDCommand() *cobra.Command {
 	byteOrderVar := newEnum([]string{"system", "le", "be"}, "system")
 
 	cmd := &cobra.Command{
@@ -66,6 +70,22 @@ func unpackStringIDCommand(log *slog.Logger) *cobra.Command {
 	}
 
 	cmd.Flags().Var(byteOrderVar, "byte-order", "binary order to decode the given value (by default uses sytems)")
+
+	return cmd
+}
+
+func stringIDCommand(log *slog.Logger) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:  "string-id  <string>",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			str := args[0]
+
+			fmt.Println(tracer.ToHashedId(str))
+
+			return nil
+		},
+	}
 
 	return cmd
 }

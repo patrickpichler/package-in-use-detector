@@ -46,6 +46,23 @@ func runTracer(ctx context.Context, log *slog.Logger) error {
 		return tracer.Export(ctx)
 	})
 
+	// TODO(patrick.pichler): move this to a CLI arg or some sort of setting.
+
+	// for _, path := range []string{
+	// 	"/proc",
+	// 	"/home/patrickp.linux",
+	// 	"/sys/fs/cgroup/kubelet.slice",
+	// 	"/var/lib/containerd",
+	// 	"/cgroups/kubelet.slice",
+	// 	"/usr/lib",
+	// 	"/etc",
+	// 	"/dev",
+	// } {
+	// 	if err := tracer.IgnorePath(path); err != nil {
+	// 		return fmt.Errorf("error while ignoring path %s: %w", path, err)
+	// 	}
+	// }
+
 	fmt.Println("attach...")
 	if err := tracer.Attach(); err != nil {
 		return fmt.Errorf("error while attaching tracer: %w", err)
