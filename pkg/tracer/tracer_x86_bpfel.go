@@ -24,7 +24,7 @@ type tracerFileAccessValue struct{ Counter uint8 }
 
 type tracerFileKey struct{ Hash uint32 }
 
-type tracerFilePath struct{ Parts [16]uint32 }
+type tracerFilePath struct{ Path [512]uint8 }
 
 type tracerFileValue struct {
 	Path             tracerFilePath
@@ -36,13 +36,6 @@ type tracerFileValue struct {
 type tracerInodeKey struct {
 	Ino uint32
 	Dev uint32
-}
-
-type tracerStringKey struct{ Hash uint32 }
-
-type tracerStringValue struct {
-	Str              [252]uint8
-	CollisionCounter uint32
 }
 
 // loadTracer returns the embedded CollectionSpec for tracer.
@@ -101,8 +94,6 @@ type tracerMapSpecs struct {
 	Files               *ebpf.MapSpec `ebpf:"files"`
 	IgnoredPaths        *ebpf.MapSpec `ebpf:"ignored_paths"`
 	InodeFileCache      *ebpf.MapSpec `ebpf:"inode_file_cache"`
-	StringValueScratch  *ebpf.MapSpec `ebpf:"string_value_scratch"`
-	Strings             *ebpf.MapSpec `ebpf:"strings"`
 }
 
 // tracerVariableSpecs contains global variables before they are loaded into the kernel.
@@ -140,8 +131,6 @@ type tracerMaps struct {
 	Files               *ebpf.Map `ebpf:"files"`
 	IgnoredPaths        *ebpf.Map `ebpf:"ignored_paths"`
 	InodeFileCache      *ebpf.Map `ebpf:"inode_file_cache"`
-	StringValueScratch  *ebpf.Map `ebpf:"string_value_scratch"`
-	Strings             *ebpf.Map `ebpf:"strings"`
 }
 
 func (m *tracerMaps) Close() error {
@@ -153,8 +142,6 @@ func (m *tracerMaps) Close() error {
 		m.Files,
 		m.IgnoredPaths,
 		m.InodeFileCache,
-		m.StringValueScratch,
-		m.Strings,
 	)
 }
 

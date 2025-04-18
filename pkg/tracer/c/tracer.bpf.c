@@ -29,29 +29,11 @@ struct {
   __type(value, struct config);
 } config_map SEC(".maps");
 
-struct string_key {
-  u32 hash;
-};
-
-struct string_value {
-  union {
-    u8 str[MAX_STRING_LEN];
-    u32 str_ints[MAX_STRING_LEN / sizeof(u32)];
-  };
-  u32 collision_counter;
-};
-
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, MAX_STRINGS);
-  __type(key, struct string_key);
-  __type(value, struct string_value);
-} strings SEC(".maps");
-
-#define MAX_PATH_COMPONENTS 16
+#define MAX_PATH      (1 << 9)
+#define MAX_PATH_MASK (1 << 9) - 1
 
 struct file_path {
-  u32 parts[MAX_PATH_COMPONENTS];
+  u8 path[MAX_PATH];
 };
 
 struct file_key {
@@ -124,18 +106,18 @@ struct {
     });
 } file_access_buffer_map SEC(".maps");
 
-struct {
-  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-  __uint(max_entries, 1);
-  __type(key, u32);
-  __type(value, struct string_value);
-} string_value_scratch SEC(".maps");
+static __attribute__((aligned(8))) u32 empty[MAX_PATH * 2] = {0};
 
 struct {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
   __uint(max_entries, 1);
   __type(key, u32);
-  __type(value, struct dentry *[MAX_PATH_COMPONENTS]);
+  // HACK(patrick.pichler): We sadly need to waste a bit of memory to make the verifier happy. The
+  // reason being that the verifier cannot keep track of the buffer access sizes when reading
+  // strings from dentries. It always thinks we are reading after memory limit. To solve this, the
+  // buffer now is simply twice the size of the max path len. This way all memory operations will
+  // for sure stay within the buffer.
+  __type(value, u8[MAX_PATH * 2]);
 } file_path_scratch SEC(".maps");
 
 struct {
@@ -145,47 +127,33 @@ struct {
   __type(value, struct file_value);
 } file_value_scratch SEC(".maps");
 
-static __always_inline u32 can_inline(struct string_value *str)
-{
-  bool less_than_four_chars = false;
-
-#pragma unroll
-  for (int i = 0; i < 5; i++) {
-    if (str->str[i] == 0) {
-      less_than_four_chars = true;
-      break;
-    }
-  }
-
-  // We cannot inline values with the MSB in the fourth char set, as this bit
-  // is used to mark if the id is inlined or not.
-  if (less_than_four_chars && str->str[0] & 1 << 7) {
-    bpf_printk("cannot inline since forth str is %d", str->str[3]);
-    return 0;
-  }
-
-  return less_than_four_chars;
-}
-
 static __always_inline u32 get_file_id(struct file_value *val)
 {
   struct file_key key = {0};
+  u8 zero = 0;
+  struct config *cfg;
+  u32 id = 0;
 
-  key.hash = jenkins_one_at_a_time(val->path.parts, sizeof(val->path.parts));
+  cfg = bpf_map_lookup_elem(&config_map, &key);
+  if (!cfg) {
+    return 0;
+  }
+
+  key.hash = jenkins_one_at_a_time(val->path.path, sizeof(val->path.path));
 
   if (bpf_map_update_elem(&files, &key, val, BPF_NOEXIST)) {
     struct file_value *existing = bpf_map_lookup_elem(&files, &key);
     if (existing) {
 #pragma unroll
-      for (int i = 0; i < MAX_PATH_COMPONENTS; i++) {
+      for (int i = 0; i < MAX_PATH; i++) {
         // collision found
-        if (val->path.parts[i] != existing->path.parts[i]) {
+        if (val->path.path[i] != existing->path.path[i]) {
           barrier();
           __sync_fetch_and_add(&existing->collision_counter, 1);
           break;
         }
         // No need to compare anything after the null termination, as the string ended.
-        if (val->path.parts[i] == 0) {
+        if (val->path.path[i] == 0) {
           break;
         }
       }
@@ -195,66 +163,7 @@ static __always_inline u32 get_file_id(struct file_value *val)
   return key.hash;
 }
 
-static __always_inline u32 get_string_id(struct qstr str)
-{
-  // TODO(patrick.pichler): key should probably be passed in as argument to be
-  // reused.
-  u32 zero = 0;
-  struct string_value *val = bpf_map_lookup_elem(&string_value_scratch, &zero);
-  if (!val) {
-    return 0;
-  }
-
-  __builtin_memset(val->str, 0, sizeof(val->str));
-
-  u32 str_len = str.len;
-
-  if (str_len > MAX_STRING_LEN) {
-    str_len = MAX_STRING_LEN;
-  }
-
-  if (bpf_core_read(&val->str, str_len, str.name)) {
-    // There is nothing we can do on failure.
-    return 0;
-  }
-
-  if (can_inline(val)) {
-    u32 id = 0;
-    __builtin_memcpy(&id, &val->str, 4);
-    return id;
-  }
-
-  bool debug = false;
-
-  debug = str_len == 13 && val->str[0] == 'k' && val->str[1] == 'u' && val->str[2] == 'b';
-
-  struct string_key key = {0};
-
-  key.hash = jenkins_one_at_a_time(val->str, str_len);
-
-  key.hash |= bpf_htonl(1L << 31);
-
-  if (bpf_map_update_elem(&strings, &key, val, BPF_NOEXIST)) {
-    struct string_value *existing = bpf_map_lookup_elem(&strings, &key);
-    if (existing) {
-#pragma unroll
-      for (int i = 0; i < sizeof(val->str); i++) {
-        // collision found
-        if (val->str[i] != existing->str[i]) {
-          barrier();
-          __sync_fetch_and_add(&existing->collision_counter, 1);
-          break;
-        }
-        // No need to compare anything after the null termination, as the string ended.
-        if (val->str[i] == '\0') {
-          break;
-        }
-      }
-    }
-  }
-
-  return key.hash;
-}
+#define MAX_PATH_COMPONENTS 16
 
 static __always_inline int get_path(struct path *path, struct file_path *out)
 {
@@ -267,19 +176,22 @@ static __always_inline int get_path(struct path *path, struct file_path *out)
   bpf_core_read(&mnt_parent_p, sizeof(struct mount *), &mnt_p->mnt_parent);
   struct dentry *mnt_root;
   struct dentry *d_parent;
-  struct qstr d_name;
-  int sz;
+  struct qstr d_name = {0};
   u32 zero = 0;
-  struct dentry **parts;
-  char name[255];
-  int current = MAX_PATH_COMPONENTS - 1;
+  u32 len = 0;
+  u8 *buf;
+  // The last value in the buffer should always be '\0'
+  u32 off = MAX_PATH - 1;
 
-  parts = bpf_map_lookup_elem(&file_path_scratch, &zero);
-  if (!parts) {
+  buf = bpf_map_lookup_elem(&file_path_scratch, &zero);
+  if (!buf) {
     return 0;
   }
 
-  __builtin_memset(parts, 0, sizeof(parts) * MAX_PATH_COMPONENTS);
+  // We only ever use up to MAX_PATH, hence we only clear the those values. Since
+  // eBPF ARRAY maps are zeroed out by default, there is no need to clear anything
+  // after MAX_PATH.
+  // __builtin_memset(buf, 0, MAX_PATH);
 
 #pragma unroll
   for (int i = 0; i < MAX_PATH_COMPONENTS; i++) {
@@ -308,49 +220,34 @@ static __always_inline int get_path(struct path *path, struct file_path *out)
       break;
     }
 
-    parts[current] = dentry;
-    dentry = d_parent;
-
-    if (current == 0) {
-      return 0;
+    if (BPF_CORE_READ_INTO(&d_name, dentry, d_name)) {
+      return 1;
     }
 
-    current--;
-  }
+    // The +1 is for the additional slash thas is required.
+    off -= (d_name.len & MAX_PATH_MASK) + 1;
 
-  if (current == MAX_PATH_COMPONENTS) {
-    return 0;
-  }
-
-  u8 parts_idx = current + 1;
-
-  for (u8 i = 0; i < MAX_PATH_COMPONENTS; i++) {
-    if (parts_idx >= MAX_PATH_COMPONENTS) {
-      break;
-    }
-
-    if (i == current) {
-      break;
-    }
-
-    struct dentry *dentry = parts[parts_idx++];
-
-    // Add this dentry name to path
-    BPF_CORE_READ_INTO(&d_name, dentry, d_name);
-
-    u32 id = get_string_id(d_name);
-    if (!id) {
-      bpf_printk("no id");
-      // Something is broken and we cannot get the ID
-      return 0;
-    }
-
-    out->parts[i] = id;
-
-    if (bpf_map_lookup_elem(&ignored_paths, out)) {
+    if (off > MAX_PATH - 1) {
+      // String overflowed
       return 2;
     }
+
+    if (!d_name.name) {
+      return 3;
+    }
+
+    len = d_name.len & MAX_PATH_MASK;
+    if (len > MAX_PATH - 1) {
+      return 3;
+    }
+
+    bpf_core_read(&buf[(off + 1) & MAX_PATH_MASK], len, d_name.name);
+    buf[off & MAX_PATH_MASK] = '/';
+
+    dentry = d_parent;
   }
+
+  bpf_probe_read_kernel_str(out->path, MAX_PATH, buf + off);
 
   // memfd files have no path in the filesystem -> extract their name
   // if (current == 0) {

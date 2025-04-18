@@ -20,7 +20,7 @@ static inline __u32 jenkins_one_at_a_time(const void *k, __u32 len)
   __u32 hash = 0;
 
   for (int i = 0; i < MAX_HASH_LEN; i += 1) {
-    if (i >= len) {
+    if (i >= len || key[i] == 0) {
       break;
     }
 

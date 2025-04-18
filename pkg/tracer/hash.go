@@ -11,6 +11,10 @@ import (
 func jenkinsOneAtATime(key []byte) uint32 {
 	var hash uint32
 	for _, b := range key {
+		if b == 0 {
+			break
+		}
+
 		hash += uint32(b)
 		hash += (hash << 10)
 		hash ^= (hash >> 6)
